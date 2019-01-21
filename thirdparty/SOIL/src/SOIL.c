@@ -26,8 +26,8 @@
 	#include <Carbon/Carbon.h>
 	#define APIENTRY
 #else
-	#include <GL/gl.h>
-	#include <GL/glx.h>
+	#include <GL/glew.h>
+	//#include <GL/glx.h>
 #endif
 
 #include "SOIL.h"
@@ -78,7 +78,7 @@ int query_DXT_capability( void );
 #define SOIL_RGBA_S3TC_DXT1		0x83F1
 #define SOIL_RGBA_S3TC_DXT3		0x83F2
 #define SOIL_RGBA_S3TC_DXT5		0x83F3
-typedef void (APIENTRY * P_SOIL_GLCOMPRESSEDTEXIMAGE2DPROC) (GLenum target, GLint level, GLenum internalformat, GLsizei width, GLsizei height, GLint border, GLsizei imageSize, const GLvoid * data);
+typedef void (GLAPIENTRY * P_SOIL_GLCOMPRESSEDTEXIMAGE2DPROC) (GLenum target, GLint level, GLenum internalformat, GLsizei width, GLsizei height, GLint border, GLsizei imageSize, const GLvoid * data);
 P_SOIL_GLCOMPRESSEDTEXIMAGE2DPROC soilGlCompressedTexImage2D = NULL;
 unsigned int SOIL_direct_load_DDS(
 		const char *filename,
@@ -1964,7 +1964,7 @@ int query_DXT_capability( void )
 		{
 			/*	and find the address of the extension function	*/
 			P_SOIL_GLCOMPRESSEDTEXIMAGE2DPROC ext_addr = NULL;
-			#ifdef WIN32
+			#if defined(WIN32) || defined(_WIN64)
 				ext_addr = (P_SOIL_GLCOMPRESSEDTEXIMAGE2DPROC)
 						wglGetProcAddress
 						(

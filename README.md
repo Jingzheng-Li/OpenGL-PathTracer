@@ -29,7 +29,8 @@ Features
 
 Build Instructions
 --------
-Open the visual studio solution (I'm using VS Community 2017) and set the configuration to 'Release' and x64 and rebuild the solution. The configuration of the renderer/sample counts/depth is moved to the scene file.
+You can generate the VS2017 solution by double clicking on the premake/premake_vs2017.bat.
+Open the visual studio solution and set the configuration to 'Release' and x64 and rebuild the solution. The configuration of the renderer/sample counts/depth is moved to the scene file.
 The scene files are in the assets folder
 
 TODO

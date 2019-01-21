@@ -158,7 +158,13 @@ void update(float secondsElapsed, GLFWwindow *window)
     }
 }
 
-void main()
+#if 0 //_WIN64
+#include <WinBase.h>
+int WINAPI WinMain( HINSTANCE instance, HINSTANCE prevInstance, LPSTR commandLine, int cmdShow )
+#else
+//int main(int argc, char** argv)
+int main()
+#endif
 {
 	srand(unsigned int(time(0)));
 
@@ -208,7 +214,7 @@ void main()
     ImGui_ImplOpenGL3_Init(glsl_version);
 
     if (!initRenderer())
-        return;
+        return 1;
 
 	double lastTime = glfwGetTime();
 	while (!glfwWindowShouldClose(window))
@@ -267,5 +273,7 @@ void main()
     ImGui::DestroyContext();
 
 	glfwTerminate();
+
+	return 0;
 }
 
