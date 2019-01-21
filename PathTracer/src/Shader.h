@@ -1,25 +1,18 @@
-#ifndef SHADER_H
-#define SHADER_H
+#pragma once
+
 // third-party libraries
-#include <GL/glew.h>
-
-// standard C++ libraries
-#include <iostream>
-#include <fstream>
-#include <stdexcept>
-#include <vector>
-
 #include <string>
-#include <sstream>
-#include <iostream>
 
-class Shader
+#include "Config.h"
+
+namespace GLSLPathTracer
 {
-	private:
-		GLuint _object;
-	public:
-		Shader(std::string filePath, GLuint shaderType);
-		GLuint object() const;
-};
-
-#endif SHADER_H
+    class Shader
+    {
+    private:
+        GLuint _object;
+    public:
+        Shader(const std::string& filePath, GLuint shaderType);
+        GLuint object() const;
+    };
+}

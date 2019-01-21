@@ -3,9 +3,10 @@
 out vec3 color;
 in vec2 TexCoords;
 uniform bool isCameraMoving;
-uniform bool hideEmitters;
+uniform bool useEnvMap;
 uniform vec3 randomVector;
 uniform vec2 screenResolution;
+uniform float hdrTexSize;
 
 uniform sampler2D accumTexture;
 uniform samplerBuffer BVH;
@@ -16,9 +17,14 @@ uniform samplerBuffer normalsTexCoordsTex;
 uniform samplerBuffer materialsTex;
 uniform samplerBuffer lightsTex;
 uniform sampler2DArray albedoTextures;
-uniform sampler2DArray metallicTextures;
-uniform sampler2DArray roughnessTextures;
+uniform sampler2DArray metallicRoughnessTextures;
 uniform sampler2DArray normalTextures;
+
+uniform sampler2D hdrTexture;
+uniform sampler1D hdrMarginalDistTexture;
+uniform sampler2D hdrCondDistTexture;
+uniform float hdrResolution;
+uniform float hdrMultiplier;
 
 uniform int numOfLights;
 uniform int maxDepth;
@@ -30,14 +36,13 @@ uniform int maxDepth;
 
 vec2 seed;
 
-vec3 tempNormal;
-
 struct Ray { vec3 origin; vec3 direction; };
-struct Material { vec4 albedo; vec4 param; vec4 texIDs; };
+struct Material { vec4 albedo; vec4 emission; vec4 param; vec4 texIDs; };
 struct Camera { vec3 up; vec3 right; vec3 forward; vec3 position; float fov; float focalDist; float aperture; };
 struct Light { vec3 position; vec3 emission; vec3 u; vec3 v; vec3 radiusAreaType; };
-struct LightSample { vec3 surfacePos; vec3 normal; vec3 emission; vec2 areaType; };
-struct State { vec3 normal; vec3 ffnormal; vec3 fhp; vec3 brdfDir; float pdf; bool isEmitter; int depth; float hitDist; vec2 texCoord; vec3 bary; int triID; int matID; Material mat; bool specularBounce; };
+struct State { vec3 normal; vec3 ffnormal; vec3 fhp; bool isEmitter; int depth; float hitDist; vec2 texCoord; vec3 bary; int triID; int matID; Material mat; bool specularBounce; };
+struct BsdfSampleRec { vec3 bsdfDir; float pdf; };
+struct LightSampleRec { vec3 surfacePos; vec3 normal; vec3 emission; float pdf; };
 
 uniform Camera camera;
 
@@ -137,7 +142,7 @@ vec3 BarycentricCoord(vec3 point, vec3 v0, vec3 v1, vec3 v2)
 }
 
 //-----------------------------------------------------------------------
-float SceneIntersect(Ray r, inout State state, inout LightSample lightSample)
+float SceneIntersect(Ray r, inout State state, inout LightSampleRec lightSampleRec)
 //-----------------------------------------------------------------------
 {
 	float t = INFINITY;
@@ -168,7 +173,10 @@ float SceneIntersect(Ray r, inout State state, inout LightSample lightSample)
 			if (d < t)
 			{
 				t = d;
-				lightSample = LightSample(position, normal, emission, radiusAreaType.yz);
+				float cosTheta = dot(-r.direction, normal);
+				float pdf = (t * t) / (radiusAreaType.y * cosTheta);
+				lightSampleRec.emission = emission;
+				lightSampleRec.pdf = pdf;
 				state.isEmitter = true;
 			}
 		}
@@ -180,9 +188,10 @@ float SceneIntersect(Ray r, inout State state, inout LightSample lightSample)
 			if (d < t)
 			{
 				t = d;
-				lightSample = LightSample(position, vec3(0), emission, radiusAreaType.yz);
+				float pdf = (t * t) / radiusAreaType.y;
+				lightSampleRec.emission = emission;
+				lightSampleRec.pdf = pdf;
 				state.isEmitter = true;
-				lightSample.normal = -r.direction;
 			}
 		}
 	}
@@ -236,7 +245,6 @@ float SceneIntersect(Ray r, inout State state, inout LightSample lightSample)
 					state.isEmitter = false;
 					state.triID = int(triIndex.w);
 					state.fhp = r.origin + r.direction * t;
-					state.hitDist = t;
 					state.bary = BarycentricCoord(state.fhp, v0, v1, v2);
 				}
 			}
@@ -277,6 +285,7 @@ float SceneIntersect(Ray r, inout State state, inout LightSample lightSample)
 		idx = stack[--ptr];
 	}
 
+	state.hitDist = t;
 	return t;
 }
 
@@ -426,23 +435,33 @@ void GetMaterialsAndTextures(inout State state, in Ray r)
 	int index = state.matID;
 	Material mat;
 
-	mat.albedo = texelFetch(materialsTex, index * 3 + 0);
-	mat.param   = texelFetch(materialsTex, index * 3 + 1);
-	mat.texIDs = texelFetch(materialsTex, index * 3 + 2);
+	mat.albedo = texelFetch(materialsTex, index * 4 + 0);
+	mat.emission = texelFetch(materialsTex, index * 4 + 1);
+	mat.param = texelFetch(materialsTex, index * 4 + 2);
+	mat.texIDs = texelFetch(materialsTex, index * 4 + 3);
 
 	vec2 texUV = state.texCoord;
 
 	if (int(mat.texIDs.x) >= 0)
-		mat.albedo.xyz *= pow(texture(albedoTextures, vec3(texUV, int(mat.texIDs.x))).xyz, vec3(2.2)).xyz;
+		mat.albedo.xyz *= pow(texture(albedoTextures, vec3(texUV, int(mat.texIDs.x))).xyz, vec3(2.2));
 
 	if (int(mat.texIDs.y) >= 0)
-		mat.param.x = pow(texture(metallicTextures, vec3(texUV, int(mat.texIDs.y))).x, 2.2);
+		mat.param.xy = pow(texture(metallicRoughnessTextures, vec3(texUV, int(mat.texIDs.y))).zy, vec2(2.2));
 
 	if (int(mat.texIDs.z) >= 0)
-		mat.param.y = pow(texture(roughnessTextures, vec3(texUV, int(mat.texIDs.z))).x, 2.2);
+	{
+		vec3 nrm = texture(normalTextures, vec3(texUV, int(mat.texIDs.z))).xyz;
+		nrm = normalize(nrm * 2.0 - 1.0);
 
-	if (int(mat.texIDs.w) >= 0)
-		tempNormal = pow(texture(normalTextures, vec3(texUV, int(mat.texIDs.w))).xyz, vec3(2.2));
+		// Orthonormal Basis
+		vec3 UpVector = abs(state.ffnormal.z) < 0.999 ? vec3(0, 0, 1) : vec3(1, 0, 0);
+		vec3 TangentX = normalize(cross(UpVector, state.ffnormal));
+		vec3 TangentY = cross(state.ffnormal, TangentX);
+
+		nrm = TangentX * nrm.x + TangentY * nrm.y + state.ffnormal * nrm.z;
+		state.normal = normalize(nrm);
+		state.ffnormal = dot(state.normal, r.direction) <= 0.0 ? state.normal : state.normal * -1.0;
+	}
 
 	state.mat = mat;
 }
@@ -451,20 +470,18 @@ void GetMaterialsAndTextures(inout State state, in Ray r)
 //----------------------------Lambert BRDF----------------------------------
 
 //-----------------------------------------------------------------------
-void LambertPdf(Ray ray, inout State state)
+float LambertPdf(Ray ray, inout State state, in vec3 bsdfDir)
 //-----------------------------------------------------------------------
 {
 	vec3 n = state.normal;
 	vec3 V = -ray.direction;
-	vec3 L = state.brdfDir;
+	vec3 L = bsdfDir;
 
-	float pdfDiff = abs(dot(L, n)) * (1.0 / PI);
-
-	state.pdf = pdfDiff;
+	return abs(dot(L, n)) * (1.0 / PI);
 }
 
 //-----------------------------------------------------------------------
-void LambertSample(in Ray ray, inout State state)
+vec3 LambertSample(in Ray ray, inout State state)
 //-----------------------------------------------------------------------
 {
 	vec3 N = state.normal;
@@ -482,25 +499,23 @@ void LambertSample(in Ray ray, inout State state)
 	dir = CosineSampleHemisphere(r1, r2);
 	dir = TangentX * dir.x + TangentY * dir.y + N * dir.z;
 
-	state.brdfDir = dir;
+	return dir;
 }
 
 //-----------------------------------------------------------------------
-vec3 LambertEval(in Ray ray, inout State state)
+vec3 LambertEval(in Ray ray, inout State state, in vec3 bsdfDir)
 //-----------------------------------------------------------------------
 {
 	vec3 N = state.normal;
 	vec3 V = -ray.direction;
-	vec3 L = state.brdfDir;
+	vec3 L = bsdfDir;
 
 	float NDotL = dot(N, L);
 	float NDotV = dot(N, V);
 	if (NDotL <= 0.0 || NDotV <= 0.0)
 		return vec3(0.0);
 
-	vec3 brdf_col = state.mat.albedo.xyz / PI;
-
-	return brdf_col * clamp(dot(N, L), 0.0, 1.0);
+	return state.mat.albedo.xyz / PI;
 }
 
 //-------------------------End of Lambert BRDF-------------------------------
@@ -535,12 +550,12 @@ float SmithG_GGX(float NDotv, float alphaG)
 }
 
 //-----------------------------------------------------------------------
-void UE4Pdf(in Ray ray, inout State state)
+float UE4Pdf(in Ray ray, inout State state, in vec3 bsdfDir)
 //-----------------------------------------------------------------------
 {
 	vec3 n = state.normal;
 	vec3 V = -ray.direction;
-	vec3 L = state.brdfDir;
+	vec3 L = bsdfDir;
 
 	float specularAlpha = max(0.001, state.mat.param.y);
 
@@ -557,11 +572,11 @@ void UE4Pdf(in Ray ray, inout State state)
 	float pdfDiff = abs(dot(L, n)) * (1.0 / PI);
 
 	// weight pdfs according to ratios
-	state.pdf = diffuseRatio * pdfDiff + specularRatio * pdfSpec;
+	return diffuseRatio * pdfDiff + specularRatio * pdfSpec;
 }
 
 //-----------------------------------------------------------------------
-void UE4Sample(in Ray ray, inout State state)
+vec3 UE4Sample(in Ray ray, inout State state)
 //-----------------------------------------------------------------------
 {
 	vec3 N = state.normal;
@@ -591,7 +606,7 @@ void UE4Sample(in Ray ray, inout State state)
 		float phi = r1 * 2.0 * PI;
 
 		float cosTheta = sqrt((1.0 - r2) / (1.0 + (a*a - 1.0) *r2));
-		float sinTheta = sqrt(1.0 - (cosTheta * cosTheta));
+		float sinTheta = clamp(sqrt(1.0 - (cosTheta * cosTheta)), 0.0, 1.0);
 		float sinPhi = sin(phi);
 		float cosPhi = cos(phi);
 
@@ -599,18 +614,17 @@ void UE4Sample(in Ray ray, inout State state)
 		halfVec = TangentX * halfVec.x + TangentY * halfVec.y + N * halfVec.z;
 
 		dir = 2.0*dot(V, halfVec)*halfVec - V;
-
 	}
-	state.brdfDir = dir;
+	return dir;
 }
 
 //-----------------------------------------------------------------------
-vec3 UE4Eval(in Ray ray, inout State state)
+vec3 UE4Eval(in Ray ray, inout State state, in vec3 bsdfDir)
 //-----------------------------------------------------------------------
 {
 	vec3 N = state.normal;
 	vec3 V = -ray.direction;
-	vec3 L = state.brdfDir;
+	vec3 L = bsdfDir;
 
 	float NDotL = dot(N, L);
 	float NDotV = dot(N, V);
@@ -632,9 +646,7 @@ vec3 UE4Eval(in Ray ray, inout State state)
 	roughg = roughg * roughg;
 	float Gs = SmithG_GGX(NDotL, roughg) * SmithG_GGX(NDotV, roughg);
 
-	vec3 brdf_col = (state.mat.albedo.xyz / PI) * (1.0 - state.mat.param.x) + Gs * Fs*Ds;
-
-	return brdf_col * clamp(dot(N, L), 0.0, 1.0);
+	return (state.mat.albedo.xyz / PI) * (1.0 - state.mat.param.x) + Gs * Fs*Ds;
 }
 
 //-------------------------END OF UE4 BRDF-------------------------------
@@ -642,14 +654,14 @@ vec3 UE4Eval(in Ray ray, inout State state)
 //----------------------------Glass BSDF----------------------------------
 
 //-----------------------------------------------------------------------
-void GlassPdf(Ray ray, inout State state)
+float GlassPdf(Ray ray, inout State state)
 //-----------------------------------------------------------------------
 {
-	state.pdf = 1.0;
+	return 1.0;
 }
 
 //-----------------------------------------------------------------------
-void GlassSample(in Ray ray, inout State state)
+vec3 GlassSample(in Ray ray, inout State state)
 //-----------------------------------------------------------------------
 {
 	float n1 = 1.0;
@@ -658,11 +670,12 @@ void GlassSample(in Ray ray, inout State state)
 	R0 *= R0;
 	float theta = dot(-ray.direction, state.ffnormal);
 	float prob = R0 + (1 - R0) * SchlickFresnel(theta);
+	vec3 dir;
 
 	//vec3 transmittance = vec3(1.0);
 	//vec3 extinction = -log(vec3(0.1, 0.1, 0.908));
 	//vec3 extinction = -log(vec3(0.905, 0.63, 0.3));
-	
+
 	float eta = dot(state.normal, state.ffnormal) > 0.0 ? (n1 / n2) : (n2 / n1);
 	vec3 transDir = normalize(refract(ray.direction, state.ffnormal, eta));
 	float cos2t = 1.0 - eta * eta * (1.0 - theta * theta);
@@ -672,13 +685,14 @@ void GlassSample(in Ray ray, inout State state)
 
 	if (cos2t < 0.0 || rand() < prob) // Reflection
 	{
-		state.brdfDir = normalize(reflect(ray.direction, state.ffnormal));
+		dir = normalize(reflect(ray.direction, state.ffnormal));
 	}
 	else  // Transmission
 	{
-		state.brdfDir = transDir;
+		dir = transDir;
 	}
 	//state.mat.albedo.xyz = transmittance;
+	return dir;
 }
 
 //-----------------------------------------------------------------------
@@ -701,108 +715,155 @@ float powerHeuristic(float a, float b)
 }
 
 //-----------------------------------------------------------------------
-void sampleSphereLight(in Light light, inout LightSample lightSample)
+void sampleSphereLight(in Light light, inout LightSampleRec lightSampleRec)
 //-----------------------------------------------------------------------
 {
 	float r1 = rand();
 	float r2 = rand();
-	lightSample.surfacePos = light.position + UniformSampleSphere(r1, r2) * light.radiusAreaType.x;
-	lightSample.normal = normalize(lightSample.surfacePos - light.position);
-	lightSample.areaType = light.radiusAreaType.yz;
+
+	lightSampleRec.surfacePos = light.position + UniformSampleSphere(r1, r2) * light.radiusAreaType.x;
+	lightSampleRec.normal = normalize(lightSampleRec.surfacePos - light.position);
+	lightSampleRec.emission = light.emission * numOfLights;
 }
 
 //-----------------------------------------------------------------------
-void sampleQuadLight(in Light light, inout LightSample lightSample)
+void sampleQuadLight(in Light light, inout LightSampleRec lightSampleRec)
 //-----------------------------------------------------------------------
 {
 	float r1 = rand();
 	float r2 = rand();
-	lightSample.surfacePos = light.position + light.u * r1 + light.v * r2;
-	lightSample.normal = normalize(cross(light.u, light.v));
-	lightSample.areaType = light.radiusAreaType.yz;
+
+	lightSampleRec.surfacePos = light.position + light.u * r1 + light.v * r2;
+	lightSampleRec.normal = normalize(cross(light.u, light.v));
+	lightSampleRec.emission = light.emission * numOfLights;
 }
 
 //-----------------------------------------------------------------------
-void sampleLight(in Light light, inout LightSample lightSample)
+void sampleLight(in Light light, inout LightSampleRec lightSampleRec)
 //-----------------------------------------------------------------------
 {
 	if (int(light.radiusAreaType.z) == 0) // Quad Light
-		sampleQuadLight(light, lightSample);
+		sampleQuadLight(light, lightSampleRec);
 	else
-		sampleSphereLight(light, lightSample);
+		sampleSphereLight(light, lightSampleRec);
 }
 
+//-----------------------------------------------------------------------
+float EnvPdf(in Ray r)
+//-----------------------------------------------------------------------
+{
+	float theta = acos(r.direction.y);
+	vec2 uv = vec2((PI + atan(r.direction.z, r.direction.x)) * (1.0 / TWO_PI), theta * (1.0 / PI));
+	float pdf = texture(hdrCondDistTexture, uv).y * texture(hdrMarginalDistTexture, uv.y).y;
+	return (pdf * hdrResolution) / (2.0 * PI * PI * sin(theta));
+}
+
+//-----------------------------------------------------------------------
+vec4 EnvSample(inout vec3 color)
+//-----------------------------------------------------------------------
+{
+	float r1 = rand();
+	float r2 = rand();
+
+	float v = texture(hdrMarginalDistTexture, r1).x;
+	float u = texture(hdrCondDistTexture, vec2(r2, v)).x;
+
+	color = texture(hdrTexture, vec2(u, v)).xyz * hdrMultiplier;
+	float pdf = texture(hdrCondDistTexture, vec2(u, v)).y * texture(hdrMarginalDistTexture, v).y;
+
+	float phi = u * TWO_PI;
+	float theta = v * PI;
+
+	if (sin(theta) == 0.0)
+		pdf = 0.0;
+
+	return vec4(-sin(theta) * cos(phi), cos(theta), -sin(theta)*sin(phi), (pdf * hdrResolution) / (2.0 * PI * PI * sin(theta)));
+}
 //-----------------------------------------------------------------------
 vec3 DirectLight(in Ray r, in State state)
 //-----------------------------------------------------------------------
 {
 	vec3 L = vec3(0.0);
-	LightSample lightSample;
-	Light light;
-	bool done = false;
-
-	//Pick a light to sample
-	int index = int(rand() * numOfLights);
-
-	// Fetch light Data
-	vec3 p = texelFetch(lightsTex, index * 5 + 0).xyz;
-	vec3 e = texelFetch(lightsTex, index * 5 + 1).xyz;
-	vec3 u = texelFetch(lightsTex, index * 5 + 2).xyz;
-	vec3 v = texelFetch(lightsTex, index * 5 + 3).xyz;
-	vec3 rad = texelFetch(lightsTex, index * 5 + 4).xyz;
-
-	light = Light(p, e, u, v, rad);
+	BsdfSampleRec bsdfSampleRec;
 
 	vec3 surfacePos = state.fhp + state.normal * EPS;
-	vec3 surfaceNormal = state.normal;
 
-	sampleLight(light, lightSample);
-
-	//Scale emission by number of lights
-	lightSample.emission = light.emission * numOfLights;
-
-	vec3 lightDir = lightSample.surfacePos - surfacePos;
-	float lightDist = length(lightDir);
-	float lightDistSq = lightDist * lightDist;
-	lightDir /= sqrt(lightDistSq);
-
-	if (dot(lightDir, surfaceNormal) <= 0.0 || dot(lightDir, lightSample.normal) >= 0.0)
-		return L;
-
-	Ray shadowRay = Ray(surfacePos, lightDir);
-	bool inShadow = SceneIntersectShadow(shadowRay, lightDist - EPS);
-
-	if (!inShadow)
+	/* Environment Light */
+	if (useEnvMap)
 	{
-		float NdotL = dot(lightSample.normal, -lightDir);
-		float lightPdf = lightDistSq / (lightSample.areaType.x * NdotL);
+		vec3 color;
+		vec4 dirPdf = EnvSample(color);
+		vec3 lightDir = dirPdf.xyz;
+		float lightPdf = dirPdf.w;
 
-		state.brdfDir = lightDir;
+		Ray shadowRay = Ray(surfacePos, lightDir);
+		bool inShadow = SceneIntersectShadow(shadowRay, INFINITY - EPS);
 
-		UE4Pdf(r, state);
-		vec3 f = UE4Eval(r, state);
+		if (!inShadow)
+		{
+			float bsdfPdf = UE4Pdf(r, state, lightDir);
+			vec3 f = UE4Eval(r, state, lightDir);
 
-		L = powerHeuristic(lightPdf, state.pdf) * f * lightSample.emission / max(0.001, lightPdf);
+			float misWeight = powerHeuristic(lightPdf, bsdfPdf);
+			if (misWeight > 0.0)
+				L += misWeight * f * abs(dot(lightDir, state.normal)) * color / lightPdf;
+		}
+	}
+
+	/* Sample Analytic Lights */
+	if (numOfLights > 0)
+	{
+		LightSampleRec lightSampleRec;
+		Light light;
+
+		//Pick a light to sample
+		int index = int(rand() * numOfLights);
+
+		// Fetch light Data
+		vec3 p = texelFetch(lightsTex, index * 5 + 0).xyz;
+		vec3 e = texelFetch(lightsTex, index * 5 + 1).xyz;
+		vec3 u = texelFetch(lightsTex, index * 5 + 2).xyz;
+		vec3 v = texelFetch(lightsTex, index * 5 + 3).xyz;
+		vec3 rad = texelFetch(lightsTex, index * 5 + 4).xyz;
+
+		light = Light(p, e, u, v, rad);
+		sampleLight(light, lightSampleRec);
+
+		vec3 lightDir = lightSampleRec.surfacePos - surfacePos;
+		float lightDist = length(lightDir);
+		float lightDistSq = lightDist * lightDist;
+		lightDir /= sqrt(lightDistSq);
+
+		if (dot(lightDir, state.normal) <= 0.0 || dot(lightDir, lightSampleRec.normal) >= 0.0)
+			return L;
+
+		Ray shadowRay = Ray(surfacePos, lightDir);
+		bool inShadow = SceneIntersectShadow(shadowRay, lightDist - EPS);
+
+		if (!inShadow)
+		{
+			float bsdfPdf = UE4Pdf(r, state, lightDir);
+			vec3 f = UE4Eval(r, state, lightDir);
+			float lightPdf = lightDistSq / (light.radiusAreaType.y * abs(dot(lightSampleRec.normal, lightDir)));
+
+			L += powerHeuristic(lightPdf, bsdfPdf) * f * abs(dot(state.normal, lightDir)) * lightSampleRec.emission / lightPdf;
+		}
 	}
 
 	return L;
 }
 
 //-----------------------------------------------------------------------
-vec3 EmitterSample(in Ray r, in LightSample lightSample, in State state)
+vec3 EmitterSample(in Ray r, in State state, in LightSampleRec lightSampleRec, in BsdfSampleRec bsdfSampleRec)
 //-----------------------------------------------------------------------
 {
 	vec3 Le;
+
 	if (state.depth == 0 || state.specularBounce)
-	{
-		Le = lightSample.emission;
-	}
+		Le = lightSampleRec.emission;
 	else
-	{
-		float cosTheta = dot(-r.direction, lightSample.normal);
-		float lightPdf = (state.hitDist * state.hitDist) / (lightSample.areaType.x * clamp(cosTheta, 0.001, 1.0));
-		Le = powerHeuristic(state.pdf, lightPdf) * lightSample.emission;
-	}
+		Le = powerHeuristic(bsdfSampleRec.pdf, lightSampleRec.pdf) * lightSampleRec.emission;
+
 	return Le;
 }
 
@@ -815,59 +876,67 @@ vec3 PathTrace(Ray r)
 	vec3 radiance = vec3(0.0);
 	vec3 throughput = vec3(1.0);
 	State state;
-	LightSample lightSample;
+	LightSampleRec lightSampleRec;
+	BsdfSampleRec bsdfSampleRec;
 
 	for (int depth = 0; depth < maxDepth; depth++)
 	{
 		state.depth = depth;
-		float t = SceneIntersect(r, state, lightSample);
+		float t = SceneIntersect(r, state, lightSampleRec);
 
 		if (t == INFINITY)
 		{
-			/*vec3 bg_up = normalize(vec3(0.0f, -1.0, -1.0));
-			bg_up.y += 1.0;
-			bg_up = normalize(bg_up);
-			float t = max(dot(r.direction, bg_up),0.0);
-			radiance += throughput * mix(vec3(1.0), vec3(0.3), t);*/
-			//float a = 0.5 * r.direction.y + 1.0;
-			//radiance += throughput * (1.0 - a * vec3(1.0) + a * vec3(0.5, 0.7, 1.0));
+			if (useEnvMap)
+			{
+				float misWeight = 1.0f;
+				vec2 uv = vec2((PI + atan(r.direction.z, r.direction.x)) * (1.0 / TWO_PI), acos(r.direction.y) * (1.0 / PI));
+
+				if (depth > 0 && !state.specularBounce)
+				{
+					float lightPdf = EnvPdf(r);
+					misWeight = powerHeuristic(bsdfSampleRec.pdf, lightPdf);
+				}
+
+				radiance += misWeight * texture(hdrTexture, uv).xyz * throughput * hdrMultiplier;
+			}
 			break;
 		}
 
 		GetNormalAndTexCoord(state, r);
 		GetMaterialsAndTextures(state, r);
 
+		radiance += state.mat.emission.xyz * throughput;
+
 		if (state.isEmitter)
 		{
-			radiance += EmitterSample(r, lightSample, state) * throughput;
+			radiance += EmitterSample(r, state, lightSampleRec, bsdfSampleRec) * throughput;
 			break;
 		}
 
-		if (state.mat.albedo.w == 0.0)
+		if (state.mat.albedo.w == 0.0) // UE4 Brdf
 		{
 			state.specularBounce = false;
-			vec3 direct = DirectLight(r, state) * throughput;
+			radiance += DirectLight(r, state) * throughput;
 
-			if (depth < maxDepth && numOfLights > 0)
-				radiance += direct;
+			bsdfSampleRec.bsdfDir = UE4Sample(r, state);
+			bsdfSampleRec.pdf = UE4Pdf(r, state, bsdfSampleRec.bsdfDir);
 
-			UE4Sample(r, state);
-			UE4Pdf(r, state);
-
-			if (state.pdf <= 0.0)
+			if (bsdfSampleRec.pdf > 0.0)
+				throughput *= UE4Eval(r, state, bsdfSampleRec.bsdfDir) * abs(dot(state.normal, bsdfSampleRec.bsdfDir)) / bsdfSampleRec.pdf;
+			else
 				break;
-			throughput *= UE4Eval(r, state) / max(state.pdf, 0.001);
 		}
-		else
+		else // Glass
 		{
 			state.specularBounce = true;
-			GlassSample(r, state);
-			GlassPdf(r, state);
 
-			throughput *= GlassEval(r, state) / state.pdf;
+			bsdfSampleRec.bsdfDir = GlassSample(r, state);
+			bsdfSampleRec.pdf = GlassPdf(r, state);
+
+			throughput *= GlassEval(r, state); // Pdf will always be 1.0
 		}
 
-		r.direction = state.brdfDir;
+		r.direction = bsdfSampleRec.bsdfDir;
 		r.origin = state.fhp + r.direction * EPS;
 	}
 

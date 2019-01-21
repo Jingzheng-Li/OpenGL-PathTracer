@@ -2,76 +2,94 @@
 
 #include <glm/glm.hpp>
 #include <string>
-#include <tiny_obj_loader.h>
 #include <vector>
-#include <Camera.h>
+#include "hdrloader.h"
+#include "GPUBVH.h"
+#include "Renderer.h"
 
-struct TriangleData
+namespace GLSLPathTracer
 {
-	glm::vec4 indices;
-};
+    class Camera;
 
-struct NormalTexData
-{
-	glm::vec3 normals[3];
-	glm::vec3 texCoords[3];
-};
+    struct TriangleData
+    {
+        glm::vec4 indices;
+    };
 
+    struct NormalTexData
+    {
+        glm::vec3 normals[3];
+        glm::vec3 texCoords[3];
+    };
 
-struct VertexData
-{
-	glm::vec3 vertex;
-};
+    struct VertexData
+    {
+        glm::vec3 vertex;
+    };
 
-struct MaterialData
-{
-	MaterialData()
-	{
-		albedo = glm::vec4(1.0f, 1.0f, 1.0f, 0.0f);
-		params = glm::vec4(0.0f, 0.5f, 0.0f, 0.0f);
-	};
-	glm::vec4 albedo; // layout: R,G,B, MaterialType
-	glm::vec4 params; // layout: metallic, roughness, IOR, transmittance
-	glm::vec4 texIDs; // layout: (Texture Map IDs) albedo ID, metallic ID, roughness ID, normalMap ID
-};
+    struct MaterialData
+    {
+        MaterialData()
+        {
+            albedo = glm::vec4(1.0f, 1.0f, 1.0f, 0.0f);
+            emission = glm::vec4(0.0f, 0.0f, 0.0f, 0.0f);
+            params = glm::vec4(0.0f, 0.5f, 0.0f, 0.0f);
+            texIDs = glm::vec4(-1.0f, -1.0f, -1.0f, -1.0f);
+        };
+        glm::vec4 albedo;  // layout: R,G,B, MaterialType
+        glm::vec4 emission;
+        glm::vec4 params;  // layout: metallic, roughness, IOR, transmittance
+        glm::vec4 texIDs;  // layout: (Texture Map IDs) albedo ID, metallicRoughness ID, normalMap ID
+    };
 
-struct TexData
-{
-	unsigned char* albedoTextures;
-	unsigned char* metallicTextures;
-	unsigned char* roughnessTextures;
-	unsigned char* normalTextures;
+    struct TexData
+    {
+        unsigned char* albedoTextures;
+        unsigned char* metallicRoughnessTextures;
+        unsigned char* normalTextures;
 
-	int albedoTexCount;
-	int metallicTexCount;
-	int roughnessTexCount;
-	int normalTexCount;
+        int albedoTexCount;
+        int metallicRoughnessTexCount;
+        int normalTexCount;
 
-	glm::vec2 albedoTextureSize;
-	glm::vec2 metallicTextureSize;
-	glm::vec2 roughnessTextureSize;
-	glm::vec2 normalTextureSize;
-};
+        glm::ivec2 albedoTextureSize;
+        glm::ivec2 metallicRoughnessTextureSize;
+        glm::ivec2 normalTextureSize;
+    };
 
-struct LightData
-{
-	glm::vec3 position; 
-	glm::vec3 emission;
-	glm::vec3 u;
-	glm::vec3 v; 
-	glm::vec3 radiusAreaType;
-};
+    struct LightData
+    {
+        glm::vec3 position;
+        glm::vec3 emission;
+        glm::vec3 u;
+        glm::vec3 v;
+        glm::vec3 radiusAreaType;
+    };
 
-class Scene
-{
-public:
-	Scene() {};
-	void addCamera(glm::vec3 pos, glm::vec3 lookAt);
-	Camera *camera;
-	std::vector<TriangleData> triangleIndices;
-	std::vector<NormalTexData> normalTexData;
-	std::vector<VertexData> vertexData;
-	std::vector<MaterialData> materialData;
-	std::vector<LightData> lightData;
-	TexData texData;
-};
+    class Scene
+    {
+    public:
+        Scene(const std::string filename) : filename(filename)
+            , camera(nullptr) 
+            , gpuBVH(nullptr)
+        {}
+        ~Scene();
+        void addCamera(glm::vec3 pos, glm::vec3 lookAt, float fov);
+        Camera *camera;
+        GPUBVH *gpuBVH;
+		GPUScene *gpuScene;
+		BVH *bvh;
+        std::vector<TriangleData> triangleIndices;
+        std::vector<NormalTexData> normalTexData;
+        std::vector<VertexData> vertexData;
+        std::vector<MaterialData> materialData;
+        std::vector<LightData> lightData;
+        TexData texData;
+        RenderOptions renderOptions;
+        HDRLoaderResult hdrLoaderRes;
+        void buildBVH();
+        const std::string& getSceneName() const { return filename; }
+    protected:
+        std::string filename;
+    };
+}
